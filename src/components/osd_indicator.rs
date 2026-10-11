@@ -2,6 +2,7 @@
 // TODO: Dismiss on click?
 
 use crate::components::app::DisplayMode;
+use crate::components::audio::model::NodeVolume;
 use crate::config;
 use cosmic::iced::platform_specific::shell::commands::layer_surface::{
     Anchor, KeyboardInteractivity, Layer, destroy_layer_surface,
@@ -29,8 +30,8 @@ pub enum Params {
     DisplayNumber(u32),
     KeyboardBrightness(f64),
     KeyboardLayout(String),
-    SinkVolume(u32, bool),
-    SourceVolume(u32, bool),
+    SinkVolume(NodeVolume),
+    SourceVolume(NodeVolume),
     AirplaneMode(bool),
     TouchpadEnabled(TouchpadOverride),
 }
@@ -50,8 +51,8 @@ impl Params {
             Self::KeyboardLayout(_) => "input-keyboard-symbolic",
             Self::AirplaneMode(true) => "airplane-mode-symbolic",
             Self::AirplaneMode(false) => "airplane-mode-disabled-symbolic",
-            Self::SinkVolume(volume, muted) => {
-                if *volume == 0 || *muted {
+            Self::SinkVolume(NodeVolume { volume, mute }) => {
+                if *volume == 0 || *mute {
                     "audio-volume-muted-symbolic"
                 } else if *volume < 33 {
                     "audio-volume-low-symbolic"
@@ -63,8 +64,8 @@ impl Params {
                     "audio-volume-overamplified-symbolic"
                 }
             }
-            Self::SourceVolume(volume, muted) => {
-                if *volume == 0 || *muted {
+            Self::SourceVolume(NodeVolume { volume, mute }) => {
+                if *volume == 0 || *mute {
                     "microphone-sensitivity-muted-symbolic"
                 } else if *volume < 33 {
                     "microphone-sensitivity-low-symbolic"
@@ -109,10 +110,16 @@ impl Params {
             Self::KeyboardBrightness(value) => Some((*value * 100.) as u32),
             // XXX
             Self::KeyboardLayout(_) => None,
-            Self::SinkVolume(_, true) => Some(0),
-            Self::SourceVolume(_, true) => Some(0),
-            Self::SinkVolume(value, false) => Some(*value),
-            Self::SourceVolume(value, false) => Some(*value),
+            Self::SinkVolume(NodeVolume { mute: true, .. }) => Some(0),
+            Self::SourceVolume(NodeVolume { mute: true, .. }) => Some(0),
+            Self::SinkVolume(NodeVolume {
+                volume,
+                mute: false,
+            }) => Some(*volume),
+            Self::SourceVolume(NodeVolume {
+                volume,
+                mute: false,
+            }) => Some(*volume),
             Self::AirplaneMode(_) => None,
             Self::TouchpadEnabled(_) => None,
             Self::DisplayToggle(_) => None,
@@ -305,8 +312,8 @@ impl State {
 
     fn max_value(&self) -> f32 {
         match self.params {
-            Params::SinkVolume(_, _) if self.amplification_sink => 150.0,
-            Params::SourceVolume(_, _) if self.amplification_source => 150.0,
+            Params::SinkVolume(_) if self.amplification_sink => 150.0,
+            Params::SourceVolume(_) if self.amplification_source => 150.0,
             _ => 100.0,
         }
     }
