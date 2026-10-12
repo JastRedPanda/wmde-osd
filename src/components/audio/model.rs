@@ -39,6 +39,12 @@ impl Node {
 struct Nodes {
     active: Option<NodeId>,
     nodes: HashMap<NodeId, Node>,
+    /// WMDE: the last value of the default node that was reported. A change is a
+    /// difference from it, not a node turning up: a device that vanishes and comes
+    /// back with a new id, as on every VT switch away and back (logind revokes the
+    /// session's audio devices meanwhile), reads as a fresh node and used to pop the
+    /// indicator up.
+    reported: Option<NodeVolume>,
 }
 
 impl Nodes {
@@ -46,9 +52,23 @@ impl Nodes {
         self.nodes.get(&self.active?)?.value()
     }
 
-    pub fn remove(&mut self, node_id: NodeId) -> bool {
+    fn remove(&mut self, node_id: NodeId) -> bool {
         self.active.take_if(|active| *active == node_id);
         self.nodes.remove(&node_id).is_some()
+    }
+
+    fn node_mut(&mut self, node_id: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(&node_id)
+    }
+
+    /// The default node's value, if it differs from the one reported last.
+    fn changed(&mut self) -> Option<NodeVolume> {
+        let value = self.active()?;
+        if self.reported == Some(value) {
+            return None;
+        }
+        self.reported = Some(value);
+        Some(value)
     }
 }
 
@@ -62,83 +82,37 @@ impl Model {
         match event {
             audio_client::Event::NodeMute(node_id, mute) => {
                 let node_id = NodeId(node_id);
-                if let Some(node) = self.sinks.nodes.get_mut(&node_id) {
-                    let old_value = node.value();
+                if let Some(node) = self.sinks.node_mut(node_id) {
                     node.mute = Some(mute);
-                    let value = node.value();
-                    if self.sinks.active == Some(node_id)
-                        && old_value != value
-                        && let Some(value) = value
-                    {
-                        return Some(Response::SinkVolume(value));
-                    }
-                } else if let Some(node) = self.sources.nodes.get_mut(&node_id) {
-                    let old_value = node.value();
+                } else if let Some(node) = self.sources.node_mut(node_id) {
                     node.mute = Some(mute);
-                    let value = node.value();
-                    if self.sources.active == Some(node_id)
-                        && old_value != value
-                        && let Some(value) = value
-                    {
-                        return Some(Response::SourceVolume(value));
-                    }
                 }
             }
 
             audio_client::Event::NodeVolume(node_id, volume, _balance) => {
                 let node_id = NodeId(node_id);
-                if let Some(node) = self.sinks.nodes.get_mut(&node_id) {
-                    let old_value = node.value();
+                if let Some(node) = self.sinks.node_mut(node_id) {
                     node.volume = Some(volume);
-                    let value = node.value();
-                    if self.sinks.active == Some(node_id)
-                        && old_value != value
-                        && let Some(value) = value
-                    {
-                        return Some(Response::SinkVolume(value));
-                    }
-                } else if let Some(node) = self.sources.nodes.get_mut(&node_id) {
-                    let old_value = node.value();
+                } else if let Some(node) = self.sources.node_mut(node_id) {
                     node.volume = Some(volume);
-                    let value = node.value();
-                    if self.sources.active == Some(node_id)
-                        && old_value != value
-                        && let Some(value) = value
-                    {
-                        return Some(Response::SourceVolume(value));
-                    }
                 }
             }
 
             audio_client::Event::DefaultSink(node_id) => {
-                let node_id = NodeId(node_id);
-                self.sinks.active = Some(node_id);
-                if let Some(value) = self.sinks.active() {
-                    return Some(Response::SinkVolume(value));
-                }
+                self.sinks.active = Some(NodeId(node_id));
             }
 
             audio_client::Event::DefaultSource(node_id) => {
-                let node_id = NodeId(node_id);
-                self.sources.active = Some(node_id);
-                if let Some(value) = self.sources.active() {
-                    return Some(Response::SourceVolume(value));
-                }
+                self.sources.active = Some(NodeId(node_id));
             }
 
             audio_client::Event::Node(node_id, node) => {
-                let node_id = NodeId(node_id);
-                if node.is_sink {
-                    self.sinks
-                        .nodes
-                        .entry(node_id)
-                        .or_insert_with(Node::default);
+                let nodes = if node.is_sink {
+                    &mut self.sinks
                 } else {
-                    self.sources
-                        .nodes
-                        .entry(node_id)
-                        .or_insert_with(Node::default);
-                }
+                    &mut self.sources
+                };
+                nodes.nodes.entry(NodeId(node_id)).or_default();
             }
 
             audio_client::Event::RemoveNode(node_id) => {
@@ -148,10 +122,14 @@ impl Model {
                 }
             }
 
-            _ => (),
+            _ => return None,
         }
 
-        None
+        // One event touches one direction, so at most one of these fires.
+        if let Some(value) = self.sinks.changed() {
+            return Some(Response::SinkVolume(value));
+        }
+        self.sources.changed().map(Response::SourceVolume)
     }
 }
 
@@ -269,6 +247,44 @@ mod tests {
         model.update(Event::NodeVolume(3, 90, None));
         model.update(Event::NodeMute(3, false));
         assert_eq!(sink(model.update(Event::DefaultSink(3))), Some((90, false)));
+    }
+
+    /// A VT switch away and back: the session loses its audio devices, and they
+    /// return under new ids with the same volume. Nothing changed for the user.
+    #[test]
+    fn a_device_that_comes_back_unchanged_stays_quiet() {
+        let mut model = connected();
+        assert!(model.update(Event::RemoveNode(SOURCE)).is_none());
+        assert!(model.update(Event::RemoveNode(SINK)).is_none());
+        for event in [
+            Event::Node(5, node(true)),
+            Event::Node(6, node(false)),
+            Event::DefaultSink(5),
+            Event::DefaultSource(6),
+            Event::NodeVolume(5, 55, None),
+            Event::NodeVolume(6, 40, None),
+            Event::NodeMute(5, false),
+            Event::NodeMute(6, true),
+        ] {
+            assert!(model.update(event).is_none());
+        }
+        assert_eq!(
+            source(model.update(Event::NodeMute(6, false))),
+            Some((40, false))
+        );
+    }
+
+    #[test]
+    fn a_device_that_comes_back_changed_reports_it() {
+        let mut model = connected();
+        model.update(Event::RemoveNode(SOURCE));
+        model.update(Event::Node(6, node(false)));
+        model.update(Event::DefaultSource(6));
+        model.update(Event::NodeVolume(6, 70, None));
+        assert_eq!(
+            source(model.update(Event::NodeMute(6, true))),
+            Some((70, true))
+        );
     }
 
     #[test]
