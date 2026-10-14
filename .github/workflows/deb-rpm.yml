@@ -53,6 +53,7 @@ jobs:
           git -C libcosmic submodule update --init --depth 1
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           path: wmde-osd
       - name: Build deps
         run: |
@@ -96,6 +97,7 @@ jobs:
           git -C libcosmic submodule update --init --depth 1
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           path: wmde-osd
       - name: Build deps
         run: |
